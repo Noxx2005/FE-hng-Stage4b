@@ -30,7 +30,11 @@ export function useWebSocket(onMessage) {
 
     socket.onmessage = (event) => {
       try {
-        onMessageRef.current(JSON.parse(event.data));
+        const frame = JSON.parse(event.data);
+        const normalized = frame.event
+          ? { ...frame, type: frame.event }
+          : frame;
+        onMessageRef.current(normalized);
       } catch (error) {
         console.error('WebSocket message parsing failed', error);
       }
@@ -38,7 +42,24 @@ export function useWebSocket(onMessage) {
 
     socket.onclose = (event) => {
       setStatus('disconnected');
-      if (event.code !== 1000) {
+      if (event.code === 4001 || event.code === 4003) {
+        const refresh_token = sessionStorage.getItem('refresh_token');
+        if (refresh_token) {
+          fetch(`${import.meta.env.VITE_API_BASE_URL}/auth/refresh`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token }),
+          })
+            .then((r) => r.json())
+            .then((data) => {
+              if (data.access_token) {
+                sessionStorage.setItem('access_token', data.access_token);
+                reconnectTimerRef.current = setTimeout(connect, 500);
+              }
+            })
+            .catch(() => {});
+        }
+      } else if (event.code !== 1000) {
         reconnectTimerRef.current = setTimeout(connect, 3000);
       }
     };

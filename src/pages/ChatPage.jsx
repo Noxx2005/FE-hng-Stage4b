@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertTriangle, LogOut, Search, ShieldCheck, RefreshCw } from 'lucide-react';
 import { apiClient } from '../lib/api';
@@ -76,32 +76,82 @@ export default function ChatPage() {
   const [error, setError] = useState('');
   const [onlineStatus, setOnlineStatus] = useState('connected');
 
+  const activeConversationRef = useRef(null);
+  useEffect(() => {
+    activeConversationRef.current = activeConversation;
+  }, [activeConversation]);
+
   const { send, status, reconnect } = useWebSocket(async (frame) => {
-    if (frame.type === 'message.receive' && activeConversation) {
+    if (frame.type === 'message.receive') {
       const currentUserId = user.id;
-      const envelope = frame.payload?.payload ? frame.payload : frame.payload?.message || frame.payload;
+      const envelope = {
+        id: frame.id,
+        from_user_id: frame.from_user_id,
+        to_user_id: frame.to_user_id,
+        payload: frame.payload,
+        created_at: frame.created_at,
+      };
+      const conv = activeConversationRef.current;
+      const isRelevant =
+        conv &&
+        (envelope.from_user_id === conv.participant?.id ||
+          envelope.to_user_id === conv.participant?.id);
+      if (!isRelevant) {
+        await loadConversations();
+        return;
+      }
       const payload = selectDecryptablePayload(envelope, currentUserId);
       const plaintext = await decryptMessage(payload, privateKey || (await reloadPrivateKey()));
-      const senderId = envelope.from_user_id || envelope.sender_id;
-      const recipientId = envelope.to_user_id || envelope.recipient_id;
-      const normalized = normalizeMessage(
-        {
-          ...envelope,
-          sender_id: senderId,
-          recipient_id: recipientId,
-          id: envelope.id || envelope.message_id || crypto.randomUUID(),
-          plaintext,
-          created_at: envelope.created_at || new Date().toISOString(),
-        },
-        currentUserId
-      );
-      setMessages((current) => [...current, normalized]);
+      const normalized = normalizeMessage({ ...envelope, plaintext }, currentUserId);
+      setMessages((current) => {
+        if (current.some((m) => m.id === normalized.id)) return current;
+        return [...current, normalized];
+      });
+      await loadConversations();
     }
   });
 
   useEffect(() => {
     setOnlineStatus(status);
   }, [status]);
+
+  const activeConversationIdRef = useRef(null);
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversation?.participant?.id || null;
+  }, [activeConversation]);
+
+  useEffect(() => {
+    if (!activeConversation) return;
+    const interval = setInterval(async () => {
+      const convId = activeConversationIdRef.current;
+      if (!convId) return;
+      try {
+        const response = await apiClient.get(`/conversations/${convId}/messages`, {
+          params: { limit: 50 },
+        });
+        const history = Array.isArray(response.data)
+          ? response.data
+          : response.data?.messages || [];
+        const privKey = privateKey || (await reloadPrivateKey());
+        const decrypted = await Promise.all(
+          history.map(async (message) => {
+            const payload = selectDecryptablePayload(message, user.id);
+            const plaintext = await decryptMessage(payload, privKey);
+            return normalizeMessage({ ...message, plaintext }, user.id);
+          })
+        );
+        const ordered = decrypted.reverse();
+        setMessages((current) => {
+          const existingIds = new Set(current.map((m) => m.id));
+          const hasNew = ordered.some((m) => !existingIds.has(m.id));
+          return hasNew ? ordered : current;
+        });
+      } catch {
+        // silent — polling should not show errors
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [activeConversation, privateKey, reloadPrivateKey, user.id]);
 
   const loadConversations = useCallback(async () => {
     try {
