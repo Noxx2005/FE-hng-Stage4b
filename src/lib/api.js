@@ -7,10 +7,15 @@ const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'https://whisperbox.koyeb.app',
 });
 
+const PUBLIC_PATHS = ['/auth/login', '/auth/register', '/auth/refresh'];
+
 api.interceptors.request.use((config) => {
-  const token = sessionStorage.getItem('access_token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+  const isPublic = PUBLIC_PATHS.some((path) => config.url?.includes(path));
+  if (!isPublic) {
+    const token = sessionStorage.getItem('access_token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
   }
   return config;
 });
